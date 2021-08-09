@@ -144,7 +144,7 @@ required. The creation time is expected to be software backed.
 
 Encrypting test message:
 
-```Shell
+```
 echo -n "Test" | ./hwcrypt signkg --name=testkg | hexdump -c -v
 0000000  \f   H   b 342 212 330 263 213 311   <   D 026   Y   = 027   Z
 0000010 241 024 226 246   Z   3 262 251   ` 343   Z 030 273 254 322 272
