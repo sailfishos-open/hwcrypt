@@ -1,0 +1,29 @@
+cc_binary {
+    name: "hwcrypt",
+
+    cflags: [
+        "-Wall",
+        "-Werror",
+        "-Wextra",
+        "-Wunused",
+        "-Wno-unused-parameter",
+    ],
+    srcs: [
+        "main.cpp",
+	"hwcrypt.proto"
+    ],
+    shared_libs: [
+        "libbinder",
+        "libchrome",
+        "libutils",
+        "libhidlbase",
+        "libkeymaster4support",
+        "libkeystore_binder",
+        "libkeystore_parcelables",
+	"libprotobuf-cpp-lite",
+    ],
+
+    proto: {
+        type: "lite",
+    },
+}
