@@ -45,6 +45,7 @@ hybris/mw/hwcrypt/rpm/copy-hal.sh
 
 In SDK:
 ```
+cd $ANDROID_ROOT
 rpm/dhd/helpers/build_packages.sh --build=hybris/mw/hwcrypt --spec=rpm/droid-hwcrypt.spec --do-not-install
 ```
 
