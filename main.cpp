@@ -552,7 +552,7 @@ void PrintHelp(const string &prog) {
        << "  Commands for key generation through signing:\n" 
        << "          generate-signkg --name=<key_name> [--time-between-tries=SECONDS] [--strongbox]\n"
        << "          signkg --name=<key_name>\n\n"
-       << "For encryption, decryption, and key generation through signing, input and output are from stdin"
+       << "For encryption, decryption, and key generation through signing, input and output are from stdin "
        << "and stdout, respectively.\n";
 }
 
