@@ -66,6 +66,9 @@ Almost all commands require key name as an argument given by
 
 - `list`: List keys defined in the device
 
+- `haskey --name=KEY`: Check if the key is defined on device. If it
+  is, program exit code is zero. Otherwise, exit code is non-zero.
+
 - `delete --name=KEY`: delete key with the name KEY
 
 - `get-chars --name=KEY [--verbose]`: list key characteristics by

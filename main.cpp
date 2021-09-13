@@ -95,6 +95,22 @@ int List(const std::string& prefix) {
   return 0;
 }
 
+// returns 1 if there is key and zero otherwise
+int HasKey(const std::string& key) {
+  std::unique_ptr<KeystoreClient> keystore = CreateKeystoreInstance();
+  std::vector<std::string> key_list;
+  if (!keystore->listKeys(key, &key_list)) {
+    cerr << "ListKeys failed.\n";
+    return 0;
+  }
+  for (const auto& key_name : key_list)
+    if (key == key_name) {
+      cout << "Key " << key << " found\n";
+      return 1;
+    }
+  return 0;
+}
+
 int DeleteKey(const std::string& name) {
   std::unique_ptr<KeystoreClient> keystore = CreateKeystoreInstance();
   auto result = keystore->deleteKey(name);
@@ -550,6 +566,7 @@ void PrintHelp(const string &prog) {
        << "          get-chars --name=<key_name> [-verbose]\n"
        << "          delete --name=<key_name>\n"
        << "          list [--prefix=<key_name_prefix>]\n\n"
+       << "          haskey [--name=<key_name>]\n\n"
        << "  Encryption and decryption commands:\n" 
        << "          generate-enc --name=<key_name> [--strongbox]\n"
        << "          [en|de]crypt --name=<key_name>\n\n"
@@ -557,7 +574,9 @@ void PrintHelp(const string &prog) {
        << "          generate-signkg --name=<key_name> [--time-between-tries=SECONDS] [--strongbox]\n"
        << "          signkg --name=<key_name>\n\n"
        << "For encryption, decryption, and key generation through signing, input and output are from stdin "
-       << "and stdout, respectively.\n";
+       << "and stdout, respectively.\n\n"
+       << "When checking for key existence with haskey command, application will have exit "
+       << "code 0 if the key was found and non-zero otherwise.\n";
 }
 
 int main(int argc, char** argv) {
@@ -586,6 +605,9 @@ int main(int argc, char** argv) {
     return DeleteKey(command_line->GetSwitchValueASCII("name"));
   } else if (args[0] == "list") {
     return List(command_line->GetSwitchValueASCII("prefix"));
+  } else if (args[0] == "haskey") {
+    // in shell logic 0 is success
+    return !HasKey(command_line->GetSwitchValueASCII("name"));
   } else if (args[0] == "generate-enc") {
     return GenerateEncryptionKey(command_line->GetSwitchValueASCII("name"),
 				 command_line->HasSwitch("strongbox") ? KEYSTORE_FLAG_STRONGBOX : KEYSTORE_FLAG_NONE);
