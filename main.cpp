@@ -201,8 +201,10 @@ int GenerateEncryptionKey(const std::string& name, int32_t flags) {
   if (result.isOk())
     PrintKeyCharacteristics(hardware_enforced_characteristics,
 			    software_enforced_characteristics);
-  else
+  else {
     cerr << "Generate key failed with error code " << result.getErrorCode() << "\n";
+    return -1;
+  }
 
   if (hardware_enforced_characteristics.size() == 0) {
     cerr << "Generated key is not hardware backed. Deleting it\n";
@@ -411,8 +413,10 @@ int GenerateSignKeyGenHardwareKey(const std::string& name, int32_t flags, int se
   if (result.isOk())
     PrintKeyCharacteristics(hardware_enforced_characteristics,
 			    software_enforced_characteristics);
-  else
+  else {
     cerr << "Generate signature key failed with error code " << result.getErrorCode() << "\n";
+    return -1;
+  }
 
   if (hardware_enforced_characteristics.size() == 0) {
     cerr << "Generated key is not hardware backed. Deleting it\n";
