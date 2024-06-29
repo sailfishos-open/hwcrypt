@@ -297,6 +297,7 @@ bool EncryptOrDecryptOnce(bool encrypt,
   // finish
   result =
 	keystore->finishOperation(handle, empty_params,
+				  std::string(), /* allow input data on finish */
 				  std::string(), /* signature_to_verify */
 				  &ignored_params, &output_data);
   if (!result.isOk()) {
@@ -544,6 +545,7 @@ int SignKeyGen(const std::string& key_name)
   // finish
   result =
 	keystore->finishOperation(handle, empty_params,
+				  std::string(), /* allow input data on finish */
 				  std::string(), /* signature_to_verify */
 				  &ignored_params, &output_data);
   if (!result.isOk()) {
