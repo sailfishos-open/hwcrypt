@@ -22,6 +22,10 @@ hardware backing. Here, hardware backing is separate secure element
 (sa Strongbox) or TEE. It should not fallback to software-only
 solution provided by Android.
 
+## Branches
+
+If the default branch does not work for your Android version, check out
+other branches in this repository.
 
 ## Compilation
 
