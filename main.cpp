@@ -14,9 +14,12 @@
 #include <aidl/android/system/keystore2/ResponseCode.h>
 #include <android/binder_manager.h>
 #include <android/binder_process.h>
+#include <keymint_support/key_param_output.h>
 
 #include <gflags/gflags.h>
 #include <iostream>
+#include <map>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -27,7 +30,8 @@ using namespace aidl::android::hardware::security::keymint;
 
 const size_t CHUNK_SIZE = 512; // using very conservative size
 
-std::shared_ptr<IKeystoreSecurityLevel> getSecurityLevel() {
+// get services
+std::shared_ptr<IKeystoreService> getKeystoreService() {
   ndk::SpAIBinder binder(AServiceManager_getService("android.system.keystore2.IKeystoreService/default"));
   if (!binder.get()) {
     std::cerr << "Failed to get Keystore2 service." << std::endl;
@@ -39,6 +43,16 @@ std::shared_ptr<IKeystoreSecurityLevel> getSecurityLevel() {
     std::cerr << "Failed to cast Keystore2 service binder." << std::endl;
     return nullptr;
   }
+
+  return service;
+}
+
+std::shared_ptr<IKeystoreSecurityLevel> getSecurityLevel(std::shared_ptr<IKeystoreService> service = nullptr) {
+  if (!service)
+    service = getKeystoreService();
+
+  if (!service)
+    return nullptr;
 
   std::shared_ptr<IKeystoreSecurityLevel> security_level;
   auto status = service->getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT, &security_level);
@@ -59,6 +73,8 @@ KeyDescriptor getKeyDescriptor(const std::string &key_name) {
 
   return descriptor;
 }
+
+// handle I/O streams
 
 bool readStdin(std::vector<uint8_t> &input) {
   // based on https://stackoverflow.com/a/39758021/11848012
@@ -88,6 +104,79 @@ void print(const std::vector<uint8_t> &data) {
   std::string output;
   output.insert(output.end(), data.begin(), data.end());
   std::cout << output;
+}
+
+// helper functions
+std::string toString(const KeyMetadata &metadata) {
+  std::ostringstream ss;
+  ss << "  Security Level: " << toString(metadata.keySecurityLevel) << std::endl;
+  std::map<SecurityLevel, std::vector<KeyParameter>> grouped;
+
+  for (const auto &param : metadata.authorizations) {
+    grouped[param.securityLevel].push_back(param.keyParameter);
+  }
+
+  for (const auto &[secLevel, params] : grouped) {
+    ss << "  + " << toString(secLevel) << ":\n";
+    for (const auto &keyParam : params) {
+      ss << "    - " << keyParam << '\n';
+    }
+  }
+
+  return ss.str();
+}
+
+int listKeys(const std::string &prefix = "", bool verbose = false) {
+  auto service = getKeystoreService();
+  if (!service) {
+    return Error() << "Failed to get keystore service";
+  }
+
+  // List keys for the current application domain
+  std::vector<KeyDescriptor> key_descriptors;
+  auto status = service->listEntries(Domain::APP, 0, &key_descriptors);
+
+  if (!status.isOk()) {
+    return Error() << "Failed to list keys: " << status.getMessage();
+  }
+
+  // Filter and display keys
+  bool found_keys = false;
+  for (const auto &descriptor : key_descriptors) {
+    const std::string alias = descriptor.alias.value_or("Key with unnamed alias");
+
+    // Apply prefix filter if specified
+    if (!prefix.empty() && alias.find(prefix) != 0) {
+      continue;
+    }
+
+    found_keys = true;
+
+    if (verbose) {
+      // Verbose output - show key characteristics
+      std::cout << "Key: " << alias << "\n";
+      std::cout << "  Domain: " << toString(descriptor.domain) << "\n";
+      std::cout << "  Namespace: " << descriptor.nspace << "\n";
+
+      KeyEntryResponse key_entry_response;
+      auto ker_status = service->getKeyEntry(descriptor, &key_entry_response);
+      if (!ker_status.isOk())
+        std::cout << "No key entry response, skipping" << "\n";
+      else
+        std::cout << toString(key_entry_response.metadata) << std::endl;
+    } else
+      std::cout << alias << std::endl;
+  }
+
+  if (!found_keys) {
+    if (prefix.empty()) {
+      std::cout << "No keys found." << std::endl;
+    } else {
+      std::cout << "No keys found with prefix: " << prefix << std::endl;
+    }
+  }
+
+  return 0;
 }
 
 // Signing
@@ -121,6 +210,7 @@ int generate_signkg(const std::string &key_name, int timeout_seconds) {
     return Error() << "generateKey failed: " << status;
 
   std::cout << "Key generated: " << key_name << std::endl;
+  std::cout << toString(metadata) << std::endl;
   return 0;
 }
 
@@ -227,11 +317,11 @@ void printUsage(const char *prog) {
             << "          list [--prefix=<key_name_prefix>]\n\n"
             << "          haskey [--name=<key_name>]\n\n"
             << "  Encryption and decryption commands:\n"
-            << "          generate-enc --name=<key_name> [--strongbox]\n"
+            << "          generate-enc --name=<key_name>\n"
             << "          [en|de]crypt --name=<key_name>\n\n"
             << "  Commands for key generation through signing:\n"
             << "          generate-signkg --name=<key_name> "
-               "[--time-between-tries=SECONDS] [--strongbox]\n"
+               "[--time-between-tries=SECONDS]\n"
             << "          signkg --name=<key_name>\n\n"
             << "For encryption, decryption, and key generation through "
                "signing, input and output are from stdin "
@@ -243,31 +333,18 @@ void printUsage(const char *prog) {
 
 bool validateCommand(Command cmd, const char *prog) {
   switch (cmd) {
-  case Command::GET_CHARS:
-  case Command::DELETE:
-  case Command::ENCRYPT:
-  case Command::DECRYPT:
-  case Command::SIGNKG:
-    if (FLAGS_name.empty()) {
-      std::cerr << "Error: --name is required for this command\n";
-      return false;
-    }
-    break;
-  case Command::GENERATE_ENC:
-  case Command::GENERATE_SIGNKG:
-    if (FLAGS_name.empty()) {
-      std::cerr << "Error: --name is required for this command\n";
-      return false;
-    }
-    break;
   case Command::LIST:
-  case Command::HASKEY:
-    // These commands have optional parameters
     break;
   case Command::UNKNOWN:
     std::cerr << "Error: Unknown command\n";
     printUsage(prog);
     return false;
+  default:
+    if (FLAGS_name.empty()) {
+      std::cerr << "Error: --name is required for this command\n";
+      return false;
+    }
+    break;
   }
   return true;
 }
@@ -288,8 +365,7 @@ int executeCommand(Command cmd) {
     break;
 
   case Command::LIST:
-    // TODO: Implement list logic
-    break;
+    return listKeys(FLAGS_prefix, FLAGS_verbose);
 
   case Command::HASKEY:
     // TODO: Implement haskey logic

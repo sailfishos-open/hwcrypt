@@ -28,6 +28,7 @@ cc_binary {
 
     static_libs: [
         "libgflags",
+        "libkeymint_support",
     ],
 
     vendor: true,
