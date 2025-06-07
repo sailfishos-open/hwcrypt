@@ -1,628 +1,350 @@
-// Copyright 2015 The Android Open Source Project
-//
-// Copyright 2021 Rinigus
-// Changes introduced as a part of hwcrypt development.
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+#include <aidl/android/hardware/security/keymint/Algorithm.h>
+#include <aidl/android/hardware/security/keymint/Digest.h>
+#include <aidl/android/hardware/security/keymint/KeyCharacteristics.h>
+#include <aidl/android/hardware/security/keymint/KeyFormat.h>
+#include <aidl/android/hardware/security/keymint/KeyParameter.h>
+#include <aidl/android/hardware/security/keymint/KeyParameterValue.h>
+#include <aidl/android/hardware/security/keymint/KeyPurpose.h>
+#include <aidl/android/hardware/security/keymint/Tag.h>
+#include <aidl/android/system/keystore2/Domain.h>
+#include <aidl/android/system/keystore2/IKeystoreSecurityLevel.h>
+#include <aidl/android/system/keystore2/IKeystoreService.h>
+#include <aidl/android/system/keystore2/KeyDescriptor.h>
+#include <aidl/android/system/keystore2/KeyMetadata.h>
+#include <aidl/android/system/keystore2/ResponseCode.h>
+#include <android/binder_manager.h>
+#include <android/binder_process.h>
 
-
-#include <cstdio>
+#include <gflags/gflags.h>
 #include <iostream>
-#include <memory>
 #include <string>
 #include <vector>
-#include <sstream>
 
-#include <base/command_line.h>
-#include <hardware/keymaster_defs.h>
-#include <keystore/keystore_client_impl.h>
+#include "error.h"
 
-#include <binder/IPCThreadState.h>
-#include <binder/IServiceManager.h>
+using namespace aidl::android::system::keystore2;
+using namespace aidl::android::hardware::security::keymint;
 
-#include "hwcrypt.pb.h"
+const size_t CHUNK_SIZE = 512; // using very conservative size
 
-using base::CommandLine;
-using namespace keystore;
-using namespace std;
-
-// AES encrytion
-const uint32_t kAESKeySize = 256;      // bits
-
-// Key generation by signing
-#define SIGNKEYGEN_RSA_KEY_SIZE 2048
-#define SIGNKEYGEN_RSA_KEY_SIZE_BYTES (SIGNKEYGEN_RSA_KEY_SIZE / 8)
-#define SIGNKEYGEN_RSA_EXPONENT 0x10001
-
-
-std::unique_ptr<KeystoreClient> CreateKeystoreInstance() {
-  return std::unique_ptr<KeystoreClient>(static_cast<KeystoreClient*>(new keystore::KeystoreClientImpl));
-}
-
-void PrintTags(const AuthorizationSet& parameters, bool verbose) {
-  for (auto iter = parameters.begin(); iter != parameters.end(); ++iter) {
-    auto tag_str = toString(iter->tag);
-    cout << " - " << tag_str;
-    if (verbose) cout << ": " << toString(*iter);
-    cout << "\n";
+std::shared_ptr<IKeystoreSecurityLevel> getSecurityLevel() {
+  ndk::SpAIBinder binder(AServiceManager_getService("android.system.keystore2.IKeystoreService/default"));
+  if (!binder.get()) {
+    std::cerr << "Failed to get Keystore2 service." << std::endl;
+    return nullptr;
   }
-}
 
-void PrintKeyCharacteristics(const AuthorizationSet& hardware_enforced_characteristics,
-			     const AuthorizationSet& software_enforced_characteristics,
-			     bool verbose = false) {
-  cout << "Hardware:\n";
-  PrintTags(hardware_enforced_characteristics, verbose);
-  cout << "\nSoftware:\n";
-  PrintTags(software_enforced_characteristics, verbose);
-}
-
-int GetCharacteristics(const std::string& name, bool verbose=false) {
-  std::unique_ptr<KeystoreClient> keystore = CreateKeystoreInstance();
-  AuthorizationSet hardware_enforced_characteristics;
-  AuthorizationSet software_enforced_characteristics;
-  auto result = keystore->getKeyCharacteristics(name, &hardware_enforced_characteristics,
-						&software_enforced_characteristics);
-  if (result.isOk())
-    PrintKeyCharacteristics(hardware_enforced_characteristics,
-			    software_enforced_characteristics,
-			    verbose);
-  else
-    cerr << "GetCharacteristics failed with error code " << result.getErrorCode() << "\n";
-  return result.getErrorCode();
-}
-
-int List(const std::string& prefix) {
-  std::unique_ptr<KeystoreClient> keystore = CreateKeystoreInstance();
-  std::vector<std::string> key_list;
-  if (!keystore->listKeys(prefix, &key_list)) {
-    cerr << "ListKeys failed.\n";
-    return 1;
+  std::shared_ptr<IKeystoreService> service = IKeystoreService::fromBinder(binder);
+  if (!service) {
+    std::cerr << "Failed to cast Keystore2 service binder." << std::endl;
+    return nullptr;
   }
-  cout << "Keys:\n";
-  for (const auto& key_name : key_list)
-    cout << " - " << key_name << "\n";
-  return 0;
-}
 
-// returns 1 if there is key and zero otherwise
-int HasKey(const std::string& key) {
-  std::unique_ptr<KeystoreClient> keystore = CreateKeystoreInstance();
-  std::vector<std::string> key_list;
-  if (!keystore->listKeys(key, &key_list)) {
-    cerr << "ListKeys failed.\n";
-    return 0;
+  std::shared_ptr<IKeystoreSecurityLevel> security_level;
+  auto status = service->getSecurityLevel(SecurityLevel::TRUSTED_ENVIRONMENT, &security_level);
+  if (!status.isOk()) {
+    std::cerr << "Failed to get security level: " << status.getMessage() << std::endl;
+    return nullptr;
   }
-  for (const auto& key_name : key_list)
-    if (key == key_name) {
-      cout << "Key " << key << " found\n";
-      return 1;
-    }
-  return 0;
+
+  return security_level;
 }
 
-int DeleteKey(const std::string& name) {
-  std::unique_ptr<KeystoreClient> keystore = CreateKeystoreInstance();
-  auto result = keystore->deleteKey(name);
-  if (!result.isOk())
-    cerr << "Delete key failed with error code " << result.getErrorCode() << "\n";
-  return result.getErrorCode();
+KeyDescriptor getKeyDescriptor(const std::string &key_name) {
+  KeyDescriptor descriptor = {
+      .domain = Domain::APP,
+      .nspace = 0,
+      .alias = key_name,
+  };
+
+  return descriptor;
 }
 
-///////////////////////////////////////////
-// Misc helper functions
-
-std::string hidlVec2String(const hidl_vec<uint8_t>& value) {
-    return std::string(reinterpret_cast<const std::string::value_type*>(&value[0]), value.size());
-}
-
-bool ReadStdin(std::string &input) {
+bool readStdin(std::vector<uint8_t> &input) {
   // based on https://stackoverflow.com/a/39758021/11848012
   // by https://stackoverflow.com/users/3807729/galik
-  const std::size_t INIT_BUFFER_SIZE = 1024;
+  const size_t INIT_BUFFER_SIZE = 1024;
 
-  // Looks like cannot reopen in Android
-  //std::freopen(nullptr, "rb", stdin);
-
-  // if(std::ferror(stdin)) {
-  //   cerr << "Error while reopening stdin in binary mode\n";
-  //   return false;
-  // }
-
-  std::size_t len;
+  size_t len;
   std::array<char, INIT_BUFFER_SIZE> buf;
 
   // use std::fread and remember to only use as many bytes as are returned
   // according to len
-  while((len = std::fread(buf.data(), sizeof(buf[0]), buf.size(), stdin)) > 0)
-    {
-      // whoopsie
-      if(std::ferror(stdin) && !std::feof(stdin)) {
-	cerr << "Error while reading stdin\n";
-	return false;
-      }
-
-      // use {buf.data(), buf.data() + len} here
-      input.insert(input.end(), buf.data(), buf.data() + len); // append to vector
-    }
-
-  return true;
-}
-
-///////////////////////////////////
-// Support for encryption
-
-bool verifyEncryptionKeyAttributes(const std::string& key_name,
-				   bool* verified) {
-  std::unique_ptr<KeystoreClient> keystore = CreateKeystoreInstance();
-  AuthorizationSet hardware_enforced_characteristics;
-  AuthorizationSet software_enforced_characteristics;
-  auto result = keystore->getKeyCharacteristics(key_name, &hardware_enforced_characteristics,
-						&software_enforced_characteristics);
-  if (!result.isOk()) {
-    cerr << "Failed to query encryption key: " << result.getErrorCode() << "\n";
-    return false;
-  }
-
-  *verified = true;
-  auto algorithm = NullOrOr(hardware_enforced_characteristics.GetTagValue(TAG_ALGORITHM),
-			    software_enforced_characteristics.GetTagValue(TAG_ALGORITHM));
-  if (!algorithm.isOk() || algorithm.value() != Algorithm::AES) {
-    cerr << "Found encryption key with invalid algorithm.\n";
-    *verified = false;
-  }
-  auto key_size = NullOrOr(hardware_enforced_characteristics.GetTagValue(TAG_KEY_SIZE),
-			   software_enforced_characteristics.GetTagValue(TAG_KEY_SIZE));
-  if (!key_size.isOk() || key_size.value() != kAESKeySize) {
-    cerr << "Found encryption key with invalid size.\n";
-    *verified = false;
-  }
-  auto block_mode = NullOrOr(hardware_enforced_characteristics.GetTagValue(TAG_BLOCK_MODE),
-			     software_enforced_characteristics.GetTagValue(TAG_BLOCK_MODE));
-  if (!block_mode.isOk() || block_mode.value() != BlockMode::CBC) {
-    cerr << "Found encryption key with invalid block mode.\n";
-    *verified = false;
-  }
-  auto padding_mode = NullOrOr(hardware_enforced_characteristics.GetTagValue(TAG_PADDING),
-			       software_enforced_characteristics.GetTagValue(TAG_PADDING));
-  if (!padding_mode.isOk() || padding_mode.value() != PaddingMode::PKCS7) {
-    cerr << "Found encryption key with invalid padding mode.\n";
-    *verified = false;
-  }
-  return true;
-}
-
-int GenerateEncryptionKey(const std::string& name, int32_t flags) {
-  std::unique_ptr<KeystoreClient> keystore = CreateKeystoreInstance();
-  AuthorizationSetBuilder params;
-  params.AesEncryptionKey(kAESKeySize)
-    .Padding(PaddingMode::PKCS7)
-    .Authorization(TAG_BLOCK_MODE, BlockMode::CBC)
-    .Authorization(TAG_NO_AUTH_REQUIRED);
-  AuthorizationSet hardware_enforced_characteristics;
-  AuthorizationSet software_enforced_characteristics;
-
-  auto result = keystore->generateKey(name, params, flags, &hardware_enforced_characteristics,
-				      &software_enforced_characteristics);
-  if (result.isOk())
-    PrintKeyCharacteristics(hardware_enforced_characteristics,
-			    software_enforced_characteristics);
-  else {
-    cerr << "Generate key failed with error code " << result.getErrorCode() << "\n";
-    return -1;
-  }
-
-  if (hardware_enforced_characteristics.size() == 0) {
-    cerr << "Generated key is not hardware backed. Deleting it\n";
-    DeleteKey(name);
-    return -1;
-  }
-
-  bool verified = true;
-  if (!verifyEncryptionKeyAttributes(name, &verified) ||
-      !verified) {
-    cerr << "Generated key failed verification, deleting\n";
-    DeleteKey(name);
-    return -1;
-  }
-
-  return result.getErrorCode();
-}
-
-bool EncryptOrDecryptOnce(bool encrypt,
-			  const std::string& key_name,
-			  const std::string& input_data,
-			  std::string &output_data) {
-  std::unique_ptr<KeystoreClient> keystore = CreateKeystoreInstance();
-  AuthorizationSetBuilder params;
-  params.Padding(PaddingMode::PKCS7);
-  params.Authorization(TAG_BLOCK_MODE, BlockMode::CBC);
-  AuthorizationSet output_params;
-  uint64_t handle;
-
-  output_data.clear();
-
-  // help vars
-  AuthorizationSet empty_params;
-  size_t num_input_bytes_consumed;
-  AuthorizationSet ignored_params;
-  std::string buf_in;
-  std::string buf_out;
-
-  if (encrypt) buf_in = input_data;
-  else {
-    EncryptedPlainData protobuf;
-    if (!protobuf.ParseFromString(input_data)) {
-      cerr << "Decrypt: Failed to parse EncryptedPlainData protobuf.\n";
+  while ((len = std::fread(buf.data(), sizeof(buf[0]), buf.size(), stdin)) > 0) {
+    // whoopsie
+    if (std::ferror(stdin) && !std::feof(stdin)) {
+      std::cerr << "Error while reading stdin\n";
       return false;
     }
 
-    params.Authorization(TAG_NONCE, protobuf.init_vector().data(),
-			 protobuf.init_vector().size());
-    buf_in = protobuf.encrypted_data();
-  }
-
-  // start encryption
-  auto result = keystore->beginOperation(encrypt ? KeyPurpose::ENCRYPT : KeyPurpose::DECRYPT,
-					 key_name, params,
-					 &output_params, &handle);
-  if (!result.isOk()) {
-    cerr << "EncryptOrDecrypt BeginOperation failed: " << result.getErrorCode() << "\n";
-    return false;
-  }
-
-  // encryption or decryption loop
-  while (buf_in.size() > 0) {
-    result = keystore->updateOperation(handle, empty_params, buf_in, &num_input_bytes_consumed,
-				       &ignored_params, &buf_out);
-    if (!result.isOk()) {
-      cerr << "EncryptOrDecrypt UpdateOperation failed: " << result.getErrorCode() << "\n";
-      return false;
-    }
-    output_data += buf_out;
-    buf_in = buf_in.substr(num_input_bytes_consumed);
-    buf_out.clear();
-  }
-
-  // finish
-  result =
-	keystore->finishOperation(handle, empty_params,
-				  std::string(), /* signature_to_verify */
-				  &ignored_params, &output_data);
-  if (!result.isOk()) {
-    cerr << "EncryptOrDecrypt FinishOperation failed: " << result.getErrorCode() << "\n";
-    return false;
-  }
-
-  if (encrypt) {
-    auto init_vector_blob = output_params.GetTagValue(TAG_NONCE);
-    if (!init_vector_blob.isOk()) {
-      cerr << "Encrypt: Missing initialization vector.\n";
-      return false;
-    }
-    std::string init_vector = hidlVec2String(init_vector_blob.value());
-    std::string encrypted_data;
-    EncryptedPlainData protobuf;
-    protobuf.set_init_vector(init_vector);
-    protobuf.set_encrypted_data(output_data);
-    if (!protobuf.SerializeToString(&encrypted_data)) {
-      cerr << "Failed to serialize encrypted data to string\n";
-      return false;
-    }
-    output_data = encrypted_data;
+    // use {buf.data(), buf.data() + len} here
+    input.insert(input.end(), buf.data(), buf.data() + len); // append to vector
   }
 
   return true;
 }
 
-int Encrypt(const std::string& key_name)
-{
-  bool verified;
-  if (!verifyEncryptionKeyAttributes(key_name, &verified) ||
-      !verified) {
-    cerr << "Encryption key failed verification\n";
-    return -1;
-  }
-
-  std::string data;
-  std::string encrypted_data;
-
-  if (!ReadStdin(data)) return -1;
-
-  if (!EncryptOrDecryptOnce(true, key_name, data, encrypted_data)) return 1;
-
-  cout << encrypted_data;
-  return 0;
+void print(const std::vector<uint8_t> &data) {
+  std::string output;
+  output.insert(output.end(), data.begin(), data.end());
+  std::cout << output;
 }
 
-int Decrypt(const std::string& key_name)
-{
-  bool verified;
-  if (!verifyEncryptionKeyAttributes(key_name, &verified) ||
-      !verified) {
-    cerr << "Encryption key failed verification\n";
-    return -1;
-  }
-
-  std::string output_data;
-  std::string encrypted_data;
-
-  if (!ReadStdin(encrypted_data)) return -1;
-  if (!EncryptOrDecryptOnce(false, key_name, encrypted_data, output_data)) return 1;
-
-  cout << output_data;
-  return 0;
-}
-
-/////////////////////////////////////////
-// Key generation through signing
-//
-// Specific encryption procedures used to generate encryption key from
-// user-provided password. Approach is based on Android Full Disk
-// Encryption (cryptfs.cpp) approach with some simplifications.
-
-
-bool verifySignKeyGenKeyAttributes(const std::string& key_name,
-				   bool* verified) {
-  std::unique_ptr<KeystoreClient> keystore = CreateKeystoreInstance();
-  AuthorizationSet hardware_enforced_characteristics;
-  AuthorizationSet software_enforced_characteristics;
-  auto result = keystore->getKeyCharacteristics(key_name, &hardware_enforced_characteristics,
-						&software_enforced_characteristics);
-  if (!result.isOk()) {
-    cerr << "Failed to query encryption key: " << result.getErrorCode() << "\n";
+// Signing
+int generate_signkg(const std::string &key_name, int timeout_seconds) {
+  auto security_level = getSecurityLevel();
+  if (!security_level)
     return false;
+
+  KeyDescriptor keyDesc = getKeyDescriptor(key_name);
+
+  std::vector<KeyParameter> params = {
+      {.tag = Tag::ALGORITHM, .value = KeyParameterValue::make<KeyParameterValue::algorithm>(Algorithm::RSA)},
+      {.tag = Tag::KEY_SIZE, .value = KeyParameterValue::make<KeyParameterValue::integer>(2048)},
+      {.tag = Tag::RSA_PUBLIC_EXPONENT, .value = KeyParameterValue::make<KeyParameterValue::longInteger>(65537)},
+      {.tag = Tag::PURPOSE, .value = KeyParameterValue::make<KeyParameterValue::keyPurpose>(KeyPurpose::SIGN)},
+      {.tag = Tag::DIGEST, .value = KeyParameterValue::make<KeyParameterValue::digest>(Digest::SHA_2_256)},
+      {.tag = Tag::PADDING,
+       .value = KeyParameterValue::make<KeyParameterValue::paddingMode>(PaddingMode::RSA_PKCS1_1_5_SIGN)},
+      {.tag = Tag::NO_AUTH_REQUIRED, .value = KeyParameterValue::make<KeyParameterValue::boolValue>(true)},
+      {.tag = Tag::MIN_SECONDS_BETWEEN_OPS,
+       .value = KeyParameterValue::make<KeyParameterValue::integer>(timeout_seconds)},
+  };
+
+  KeyMetadata metadata;
+  auto status = security_level->generateKey(keyDesc, {}, // attestation key
+                                            params,
+                                            0,  // flags
+                                            {}, // entropy
+                                            &metadata);
+  if (!status.isOk())
+    return Error() << "generateKey failed: " << status;
+
+  std::cout << "Key generated: " << key_name << std::endl;
+  return 0;
+}
+
+int signkg(const std::string &key_name) {
+  auto security_level = getSecurityLevel();
+  if (!security_level)
+    return false;
+
+  // Read input
+  std::vector<uint8_t> input;
+  if (!readStdin(input))
+    return Error() << "Failed to read from stdin.";
+
+  // Prepare for signing
+  std::optional<std::vector<uint8_t>> signature;
+  KeyDescriptor keyDesc = getKeyDescriptor(key_name);
+
+  std::vector<KeyParameter> params = {
+      {.tag = Tag::PURPOSE, .value = KeyParameterValue::make<KeyParameterValue::keyPurpose>(KeyPurpose::SIGN)},
+      {.tag = Tag::DIGEST, .value = KeyParameterValue::make<KeyParameterValue::digest>(Digest::SHA_2_256)},
+      {.tag = Tag::PADDING,
+       .value = KeyParameterValue::make<KeyParameterValue::paddingMode>(PaddingMode::RSA_PKCS1_1_5_SIGN)},
+  };
+  CreateOperationResponse opResponse;
+
+  auto status = security_level->createOperation(keyDesc, params, false, &opResponse);
+  if (!status.isOk())
+    return Error() << "Failed to create keystore signing operation: " << status;
+  auto operation = opResponse.iOperation;
+
+  // push all data into operation with chunks
+  for (size_t i = 0; i < input.size(); i += CHUNK_SIZE) {
+    size_t chunk_size = std::min(CHUNK_SIZE, input.size() - i);
+    std::vector<uint8_t> chunk(input.begin() + i, input.begin() + i + chunk_size);
+
+    std::optional<std::vector<uint8_t>> output;
+    status = operation->update(chunk, &output);
+    if (!status.isOk()) {
+      operation->finish({}, {}, &signature);
+      return Error() << "Failed to call keystore update operation:" << status;
+    }
   }
 
-  *verified = true;
-  auto algorithm = NullOrOr(hardware_enforced_characteristics.GetTagValue(TAG_ALGORITHM),
-			    software_enforced_characteristics.GetTagValue(TAG_ALGORITHM));
-  if (!algorithm.isOk() || algorithm.value() != Algorithm::RSA) {
-    cerr << "Found encryption key with invalid algorithm.\n";
-    *verified = false;
-  }
-  auto key_size = NullOrOr(hardware_enforced_characteristics.GetTagValue(TAG_KEY_SIZE),
-			   software_enforced_characteristics.GetTagValue(TAG_KEY_SIZE));
-  if (!key_size.isOk() || key_size.value() != SIGNKEYGEN_RSA_KEY_SIZE) {
-    cerr << "Found encryption key with invalid size.\n";
-    *verified = false;
-  }
-  auto block_mode = NullOrOr(hardware_enforced_characteristics.GetTagValue(TAG_DIGEST),
-			     software_enforced_characteristics.GetTagValue(TAG_DIGEST));
-  if (!block_mode.isOk() || block_mode.value() != Digest::NONE) {
-    cerr << "Found encryption key with invalid block mode.\n";
-    *verified = false;
-  }
-  auto padding_mode = NullOrOr(hardware_enforced_characteristics.GetTagValue(TAG_PADDING),
-			       software_enforced_characteristics.GetTagValue(TAG_PADDING));
-  if (!padding_mode.isOk() || padding_mode.value() != PaddingMode::NONE) {
-    cerr << "Found encryption key with invalid padding mode.\n";
-    *verified = false;
+  // Sign
+  status = operation->finish({}, {}, &signature);
+  if (!status.isOk())
+    return Error() << "Failed to call keystore finish operation:" << status;
+
+  if (!signature.has_value())
+    return Error() << "Didn't receive a signature from keystore finish operation.";
+
+  print(signature.value());
+
+  return true;
+}
+
+// command line options
+DEFINE_string(name, "", "Key name for operations");
+DEFINE_string(prefix, "", "Key name prefix for list command");
+DEFINE_bool(verbose, false, "Enable verbose output");
+DEFINE_int32(time_between_tries, 0, "Time between tries in seconds for generate-signkg");
+
+enum class Command {
+  UNKNOWN,
+  GET_CHARS,
+  DELETE,
+  LIST,
+  HASKEY,
+  GENERATE_ENC,
+  ENCRYPT,
+  DECRYPT,
+  GENERATE_SIGNKG,
+  SIGNKG
+};
+
+Command parseCommand(const std::string &cmd) {
+  if (cmd == "get-chars")
+    return Command::GET_CHARS;
+  if (cmd == "delete")
+    return Command::DELETE;
+  if (cmd == "list")
+    return Command::LIST;
+  if (cmd == "haskey")
+    return Command::HASKEY;
+  if (cmd == "generate-enc")
+    return Command::GENERATE_ENC;
+  if (cmd == "encrypt")
+    return Command::ENCRYPT;
+  if (cmd == "decrypt")
+    return Command::DECRYPT;
+  if (cmd == "generate-signkg")
+    return Command::GENERATE_SIGNKG;
+  if (cmd == "signkg")
+    return Command::SIGNKG;
+  return Command::UNKNOWN;
+}
+
+void printUsage(const char *prog) {
+  std::cout << "Usage: " << prog << " command [arguments]\n\n"
+            << "Commands: \n\n"
+            << "  Generic commands:\n"
+            << "          get-chars --name=<key_name> [-verbose]\n"
+            << "          delete --name=<key_name>\n"
+            << "          list [--prefix=<key_name_prefix>]\n\n"
+            << "          haskey [--name=<key_name>]\n\n"
+            << "  Encryption and decryption commands:\n"
+            << "          generate-enc --name=<key_name> [--strongbox]\n"
+            << "          [en|de]crypt --name=<key_name>\n\n"
+            << "  Commands for key generation through signing:\n"
+            << "          generate-signkg --name=<key_name> "
+               "[--time-between-tries=SECONDS] [--strongbox]\n"
+            << "          signkg --name=<key_name>\n\n"
+            << "For encryption, decryption, and key generation through "
+               "signing, input and output are from stdin "
+            << "and stdout, respectively.\n\n"
+            << "When checking for key existence with haskey command, "
+               "application will have exit "
+            << "code 0 if the key was found and non-zero otherwise.\n";
+}
+
+bool validateCommand(Command cmd, const char *prog) {
+  switch (cmd) {
+  case Command::GET_CHARS:
+  case Command::DELETE:
+  case Command::ENCRYPT:
+  case Command::DECRYPT:
+  case Command::SIGNKG:
+    if (FLAGS_name.empty()) {
+      std::cerr << "Error: --name is required for this command\n";
+      return false;
+    }
+    break;
+  case Command::GENERATE_ENC:
+  case Command::GENERATE_SIGNKG:
+    if (FLAGS_name.empty()) {
+      std::cerr << "Error: --name is required for this command\n";
+      return false;
+    }
+    break;
+  case Command::LIST:
+  case Command::HASKEY:
+    // These commands have optional parameters
+    break;
+  case Command::UNKNOWN:
+    std::cerr << "Error: Unknown command\n";
+    printUsage(prog);
+    return false;
   }
   return true;
 }
 
+int executeCommand(Command cmd) {
+  // init binder
+  ABinderProcess_setThreadPoolMaxThreadCount(1);
+  ABinderProcess_startThreadPool();
 
-int GenerateSignKeyGenHardwareKey(const std::string& name, int32_t flags, int seconds_between_tries) {
-  std::unique_ptr<KeystoreClient> keystore = CreateKeystoreInstance();
-  AuthorizationSetBuilder params;
-  params.RsaSigningKey(SIGNKEYGEN_RSA_KEY_SIZE, SIGNKEYGEN_RSA_EXPONENT)
-    .NoDigestOrPadding()
-    .Authorization(TAG_NO_AUTH_REQUIRED)
-    .Authorization(TAG_MIN_SECONDS_BETWEEN_OPS, seconds_between_tries);
+  // process the command
+  switch (cmd) {
+  case Command::GET_CHARS:
+    // TODO: Implement get-chars logic
+    break;
 
-  AuthorizationSet hardware_enforced_characteristics;
-  AuthorizationSet software_enforced_characteristics;
+  case Command::DELETE:
+    // TODO: Implement delete logic
+    break;
 
-  auto result = keystore->generateKey(name, params, flags, &hardware_enforced_characteristics,
-				      &software_enforced_characteristics);
-  if (result.isOk())
-    PrintKeyCharacteristics(hardware_enforced_characteristics,
-			    software_enforced_characteristics);
-  else {
-    cerr << "Generate signature key failed with error code " << result.getErrorCode() << "\n";
-    return -1;
+  case Command::LIST:
+    // TODO: Implement list logic
+    break;
+
+  case Command::HASKEY:
+    // TODO: Implement haskey logic
+    // Return 0 if key exists, non-zero otherwise
+    break;
+
+  case Command::GENERATE_ENC:
+    // TODO: Implement generate-enc logic
+    break;
+
+  case Command::ENCRYPT:
+    break;
+
+  case Command::DECRYPT:
+    break;
+
+  case Command::GENERATE_SIGNKG:
+    return generate_signkg(FLAGS_name, FLAGS_time_between_tries);
+
+  case Command::SIGNKG:
+    return signkg(FLAGS_name);
+
+  default:
+    return 1;
   }
-
-  if (hardware_enforced_characteristics.size() == 0) {
-    cerr << "Generated key is not hardware backed. Deleting it\n";
-    DeleteKey(name);
-    return -1;
-  }
-
-  bool verified = true;
-  if (!verifySignKeyGenKeyAttributes(name, &verified) ||
-      !verified) {
-    cerr << "Generated signature key failed verification, deleting\n";
-    DeleteKey(name);
-    return -1;
-  }
-
-  return result.getErrorCode();
-}
-
-int SignKeyGen(const std::string& key_name)
-{
-  bool verified;
-  if (!verifySignKeyGenKeyAttributes(key_name, &verified) ||
-      !verified) {
-    cerr << "Encryption key failed verification\n";
-    return -1;
-  }
-
-  std::string data;
-  std::string output_data;
-
-  if (!ReadStdin(data)) return -1;
-
-  // encryption works only for smaller datasets
-  if (data.size() > SIGNKEYGEN_RSA_KEY_SIZE_BYTES-1) {
-    cerr << "Input data too large for RSA signing\n";
-    return -1;
-  }
-  
-  // note from cryptfs.cpp:
-  // To sign a message with RSA, the message must satisfy two
-  // constraints:
-  //
-  // 1. The message, when interpreted as a big-endian numeric value, must
-  //    be strictly less than the public modulus of the RSA key.  Note
-  //    that because the most significant bit of the public modulus is
-  //    guaranteed to be 1 (else it's an (n-1)-bit key, not an n-bit
-  //    key), an n-bit message with most significant bit 0 always
-  //    satisfies this requirement.
-  //
-  // 2. The message must have the same length in bits as the public
-  //    modulus of the RSA key.  This requirement isn't mathematically
-  //    necessary, but is necessary to ensure consistency in
-  //    implementations.
-  
-  std::string buf_in;
-
-  // same padding as in cryptfs.cpp:
-  buf_in = std::string(1, 0) + data;
-  if (buf_in.size() < SIGNKEYGEN_RSA_KEY_SIZE_BYTES)
-    buf_in += std::string(SIGNKEYGEN_RSA_KEY_SIZE_BYTES - buf_in.size(), 0);
-
-  ///////////////////////////////////
-  // signing with RSA
-  std::unique_ptr<KeystoreClient> keystore = CreateKeystoreInstance();
-  AuthorizationSetBuilder params;
-  params.NoDigestOrPadding();
-  AuthorizationSet output_params;
-  uint64_t handle;
-
-  output_data.clear();
-
-  // help vars
-  AuthorizationSet empty_params;
-  size_t num_input_bytes_consumed;
-  AuthorizationSet ignored_params;
-  std::string buf_out;
-  KeyStoreNativeReturnCode result;
-  
-  // start operation
-  while (true) {
-    result = keystore->beginOperation(KeyPurpose::SIGN,
-				      key_name, params,
-				      &output_params, &handle);
-    if (result.isOk())
-      break;
-
-    if (result == ErrorCode::KEY_RATE_LIMIT_EXCEEDED) {
-      sleep(1);
-    } else {
-      // some other error
-      cerr << "EncryptOrDecrypt BeginOperation failed: " << result.getErrorCode() << "\n";
-      return -2;
-    }
-  }
-
-  // data loop
-  while (buf_in.size() > 0) {
-    result = keystore->updateOperation(handle, empty_params, buf_in, &num_input_bytes_consumed,
-				       &ignored_params, &buf_out);
-    if (!result.isOk()) {
-      cerr << "EncryptOrDecrypt UpdateOperation failed: " << result.getErrorCode() << "\n";
-      return false;
-    }
-    output_data += buf_out;
-    buf_in = buf_in.substr(num_input_bytes_consumed);
-    buf_out.clear();
-  }
-
-  // finish
-  result =
-	keystore->finishOperation(handle, empty_params,
-				  std::string(), /* signature_to_verify */
-				  &ignored_params, &output_data);
-  if (!result.isOk()) {
-    cerr << "EncryptOrDecrypt FinishOperation failed: " << result.getErrorCode() << "\n";
-    return false;
-  }
-
-  cout << output_data;
   return 0;
 }
 
+int main(int argc, char **argv) {
+  // Set up gflags
+  gflags::SetUsageMessage("Android CLI utility for key management and cryptographic operations");
+  gflags::SetVersionString("1.0.0");
 
+  gflags::ParseCommandLineFlags(&argc, &argv, true);
 
-/////////////////////////////////////////
-// Main and help
-void PrintHelp(const string &prog) {
-  cout << "Usage: " << prog << " command [arguments]\n\n"
-       << "Commands: \n\n"
-       << "  Generic commands:\n"
-       << "          get-chars --name=<key_name> [-verbose]\n"
-       << "          delete --name=<key_name>\n"
-       << "          list [--prefix=<key_name_prefix>]\n\n"
-       << "          haskey [--name=<key_name>]\n\n"
-       << "  Encryption and decryption commands:\n" 
-       << "          generate-enc --name=<key_name> [--strongbox]\n"
-       << "          [en|de]crypt --name=<key_name>\n\n"
-       << "  Commands for key generation through signing:\n" 
-       << "          generate-signkg --name=<key_name> [--time-between-tries=SECONDS] [--strongbox]\n"
-       << "          signkg --name=<key_name>\n\n"
-       << "For encryption, decryption, and key generation through signing, input and output are from stdin "
-       << "and stdout, respectively.\n\n"
-       << "When checking for key existence with haskey command, application will have exit "
-       << "code 0 if the key was found and non-zero otherwise.\n";
-}
-
-int main(int argc, char** argv) {
-  CommandLine::Init(argc, argv);
-  CommandLine* command_line = CommandLine::ForCurrentProcess();
-  CommandLine::StringVector args = command_line->GetArgs();
-
-  android::ProcessState::self()->startThreadPool();
-
-  if (args.empty()) {
-    PrintHelp(argv[0]);
-    return 0;
+  // Check if we have at least one argument (the command)
+  if (argc < 2) {
+    printUsage(argv[0]);
+    return 1;
   }
 
-  int seconds_between_tries = 1;
-  if (command_line->HasSwitch("time-between-tries")) {
-    std::string ntxt = command_line->GetSwitchValueASCII("time-between-tries");
-    stringstream s(ntxt);
-    s >> seconds_between_tries;
+  // Parse the command
+  std::string cmdStr = argv[1];
+  Command cmd = parseCommand(cmdStr);
+
+  // Validate command and its required parameters
+  if (!validateCommand(cmd, argv[0])) {
+    return 1;
   }
 
-  if (args[0] == "get-chars") {
-    return GetCharacteristics(command_line->GetSwitchValueASCII("name"),
-			      command_line->HasSwitch("verbose"));
-  } else if (args[0] == "delete") {
-    return DeleteKey(command_line->GetSwitchValueASCII("name"));
-  } else if (args[0] == "list") {
-    return List(command_line->GetSwitchValueASCII("prefix"));
-  } else if (args[0] == "haskey") {
-    // in shell logic 0 is success
-    return !HasKey(command_line->GetSwitchValueASCII("name"));
-  } else if (args[0] == "generate-enc") {
-    return GenerateEncryptionKey(command_line->GetSwitchValueASCII("name"),
-				 command_line->HasSwitch("strongbox") ? KEYSTORE_FLAG_STRONGBOX : KEYSTORE_FLAG_NONE);
-  } else if (args[0] == "encrypt") {
-    return Encrypt(command_line->GetSwitchValueASCII("name"));
-  } else if (args[0] == "decrypt") {
-    return Decrypt(command_line->GetSwitchValueASCII("name"));
-  } else if (args[0] == "generate-signkg") {
-    return GenerateSignKeyGenHardwareKey(command_line->GetSwitchValueASCII("name"),
-					 command_line->HasSwitch("strongbox") ? KEYSTORE_FLAG_STRONGBOX : KEYSTORE_FLAG_NONE,
-					 seconds_between_tries);
-  } else if (args[0] == "signkg") {
-    return SignKeyGen(command_line->GetSwitchValueASCII("name"));
-  }
+  // Execute the command
+  int result = executeCommand(cmd);
 
-  PrintHelp(argv[0]);
-  return 0;
+  // Cleanup gflags
+  gflags::ShutDownCommandLineFlags();
+
+  return result;
 }

@@ -10,20 +10,25 @@ cc_binary {
     ],
     srcs: [
         "main.cpp",
-	"hwcrypt.proto"
-    ],
-    shared_libs: [
-        "libbinder",
-        "libchrome",
-        "libutils",
-        "libhidlbase",
-        "libkeymaster4support",
-        "libkeystore_binder",
-        "libkeystore_parcelables",
-	"libprotobuf-cpp-lite",
     ],
 
-    proto: {
-        type: "lite",
-    },
+    defaults: [
+        "keystore2_use_latest_aidl_ndk_shared",
+        "keymint_use_latest_hal_aidl_ndk_shared",
+    ],
+
+    shared_libs: [
+        "libbinder",
+        "libbinder_ndk",
+        "libutils",
+        "liblog",
+        "libbase",
+        "libcrypto",
+    ],
+
+    static_libs: [
+        "libgflags",
+    ],
+
+    vendor: true,
 }
