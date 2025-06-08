@@ -10,7 +10,9 @@ cc_binary {
     ],
     srcs: [
         "main.cpp",
+        "hwcrypt.proto",
     ],
+    local_include_dirs: ["."],
 
     defaults: [
         "keystore2_use_latest_aidl_ndk_shared",
@@ -31,5 +33,7 @@ cc_binary {
         "libkeymint_support",
     ],
 
-    vendor: true,
+    proto: {
+        type: "lite",
+    },
 }

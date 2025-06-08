@@ -2,9 +2,16 @@
 
 `hwcrypt` tool allows to encrypt/decrypt files and use for key
 generation through signing. Tool is targeting Hybris systems and
-relies of Android stack for hardware based encryption. Tool is based
+relies of Android stack for hardware based encryption. There are
+several versions of this tool with some using keystore v1 and some
+keystore2.
+
+Original tool was based
 on `system/security/keystore/keystore_cli_v2.cpp`,
 `system/vold/cryptfs.cpp` and codes used by them.
+Later, for keystore2, it was
+rewritten using multiple sources and, in addition, `system/security/ondevice-signing`.
+All versions have the same UI.
 
 For encryption, decryption, and signing, `hwcrypt` takes input data
 from standard input and outputs result through standard output.
@@ -84,8 +91,8 @@ Almost all commands require key name as an argument given by
 
 ### Encrypting and decrypting data
 
-- `generate-enc --name=KEY [--strongbox]`: generate hardware backed
-  key with a unique name, optionally using Strongbox. If Secure
+- `generate-enc --name=KEY`: generate hardware backed
+  key with a unique name. If Secure
   Element backing is requested but not available, command will fail.
 
 - `encrypt --name=KEY`: Encrypt text or binary as in
@@ -101,10 +108,11 @@ To use hardware backed encryption key as a part of deterministic key
 generator, `hwcrypt` signs input data in it's raw form with the
 minimum padding. The approach is based on part of the key generation
 scheme used by Android for [disk
-encryption](https://source.android.com/security/encryption/full-disk#storing_the_encrypted_key). Signing is performed by RSA key.
+encryption](https://source.android.com/security/encryption/full-disk#storing_the_encrypted_key).
+Signing is performed by RSA key to make sure it is deterministic.
 
-- `generate-signkg --name=KEY [--time-between-tries=SECONDS]
-  [--strongbox]`: Generates RSA key that can be used for signing
+- `generate-signkg --name=KEY [--time-between-tries=SECONDS]`:
+  Generates RSA key that can be used for signing
   data. Key usage is limited as one use per period of time given by
   `--time-between-tries=SECONDS` which is set to 1 second by
   default. While creating the key, note whether
@@ -114,7 +122,7 @@ encryption](https://source.android.com/security/encryption/full-disk#storing_the
 
 - `signkg --name=KEY`: sign input data with the specified key.
 
-As used by Android, signed data is padded by one byte with zero value
+In the original version of hwcrypt, signed data is padded by one byte with zero value
 on the left and as many bytes with zero value on the right to match
 key size - 256 bytes. Implementation limits maximal data allowed to be
 signed to 255 bytes. However, as main usage is targeting 32 byte keys
@@ -122,28 +130,35 @@ signing, it is not a limitation. Output is always 256 bytes that can
 be processed further by scrypt or similar to reduce resulting key
 size.
 
+Handling of input data and signing slightly changed in keystore2 version. As
+it is using digest and padding, handling of input data is automatic and it can
+sign documents of any length.
+
+
 Example usage:
 
 ```Shell
 > ./hwcrypt generate-signkg --name=testkg --time-between-tries=10
-Hardware:
- - PURPOSE
- - PURPOSE
- - DIGEST
- - PADDING
- - ALGORITHM
- - KEY_SIZE
- - RSA_PUBLIC_EXPONENT
- - BLOB_USAGE_REQUIREMENTS
- - MIN_SECONDS_BETWEEN_OPS
- - NO_AUTH_REQUIRED
- - ORIGIN
- - 0x700002bf
- - OS_VERSION
- - OS_PATCHLEVEL
-
-Software:
- - CREATION_DATETIME
+Key generated: testkg
+  Security Level: TRUSTED_ENVIRONMENT
+  + SOFTWARE:
+    - KeyParameter{tag: USER_ID, value: KeyParameterValue{integer: 0}}
+  + TRUSTED_ENVIRONMENT:
+    - KeyParameter{tag: PURPOSE, value: KeyParameterValue{keyPurpose: SIGN}}
+    - KeyParameter{tag: ALGORITHM, value: KeyParameterValue{algorithm: RSA}}
+    - KeyParameter{tag: KEY_SIZE, value: KeyParameterValue{integer: 2048}}
+    - KeyParameter{tag: DIGEST, value: KeyParameterValue{digest: SHA_2_256}}
+    - KeyParameter{tag: PADDING, value: KeyParameterValue{paddingMode: RSA_PKCS1_1_5_SIGN}}
+    - KeyParameter{tag: RSA_PUBLIC_EXPONENT, value: KeyParameterValue{longInteger: 65537}}
+    - KeyParameter{tag: MIN_SECONDS_BETWEEN_OPS, value: KeyParameterValue{integer: 10}}
+    - KeyParameter{tag: NO_AUTH_REQUIRED, value: KeyParameterValue{boolValue: true}}
+    - KeyParameter{tag: ORIGIN, value: KeyParameterValue{origin: GENERATED}}
+    - KeyParameter{tag: OS_VERSION, value: KeyParameterValue{integer: 140000}}
+    - KeyParameter{tag: OS_PATCHLEVEL, value: KeyParameterValue{integer: 202503}}
+    - KeyParameter{tag: VENDOR_PATCHLEVEL, value: KeyParameterValue{integer: 20240701}}
+    - KeyParameter{tag: BOOT_PATCHLEVEL, value: KeyParameterValue{integer: 20240701}}
+  + KEYSTORE:
+    - KeyParameter{tag: CREATION_DATETIME, value: KeyParameterValue{dateTime: 1749363107447}}
 ```
 
 Notice that most of the key properties are implemented in hardware, as

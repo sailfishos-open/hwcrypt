@@ -14,7 +14,7 @@
 
 syntax = "proto2";
 
-package keystore;
+package hwcrypt;
 
 option optimize_for = LITE_RUNTIME;
 

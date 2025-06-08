@@ -16,6 +16,7 @@
 #include <android/binder_process.h>
 #include <keymint_support/key_param_output.h>
 
+#include <fstream>
 #include <gflags/gflags.h>
 #include <iostream>
 #include <map>
@@ -24,11 +25,15 @@
 #include <vector>
 
 #include "error.h"
+#include "hwcrypt.pb.h"
 
 using namespace aidl::android::system::keystore2;
 using namespace aidl::android::hardware::security::keymint;
 
 const size_t CHUNK_SIZE = 512; // using very conservative size
+
+// encryption parameters
+const int ENCRYPTION_MAC_LENGTH = 128;
 
 // get services
 std::shared_ptr<IKeystoreService> getKeystoreService() {
@@ -106,10 +111,12 @@ void print(const std::vector<uint8_t> &data) {
   std::cout << output;
 }
 
-// helper functions
+// commands: provide information regarding keys
+
 std::string toString(const KeyMetadata &metadata) {
   std::ostringstream ss;
   ss << "  Security Level: " << toString(metadata.keySecurityLevel) << std::endl;
+
   std::map<SecurityLevel, std::vector<KeyParameter>> grouped;
 
   for (const auto &param : metadata.authorizations) {
@@ -124,6 +131,50 @@ std::string toString(const KeyMetadata &metadata) {
   }
 
   return ss.str();
+}
+
+int getCharacteristics(const std::string &key_name) {
+  auto service = getKeystoreService();
+  if (!service) {
+    return Error() << "Failed to get keystore service";
+  }
+
+  KeyDescriptor descriptor = getKeyDescriptor(key_name);
+
+  KeyEntryResponse key_entry_response;
+  auto ker_status = service->getKeyEntry(descriptor, &key_entry_response);
+  if (!ker_status.isOk()) {
+    std::cout << "Key not found" << "\n";
+    return 0;
+  }
+
+  auto metadata = key_entry_response.metadata;
+
+  std::cout << "Key: " << key_name << "\n";
+  std::cout << "  Domain: " << toString(descriptor.domain) << "\n";
+  std::cout << "  Namespace: " << descriptor.nspace << "\n";
+  std::cout << toString(metadata) << std::endl;
+  return 0;
+}
+
+// NB! returns 0 if there is a key and non-zero otherwise
+int hasKey(const std::string &key_name) {
+  auto service = getKeystoreService();
+  if (!service) {
+    return Error() << "Failed to get keystore service";
+  }
+
+  KeyDescriptor descriptor = getKeyDescriptor(key_name);
+
+  KeyEntryResponse key_entry_response;
+  auto ker_status = service->getKeyEntry(descriptor, &key_entry_response);
+  if (!ker_status.isOk()) {
+    std::cout << "Key " << key_name << " not found" << "\n";
+    return 1;
+  }
+
+  std::cout << "Key " << key_name << " found\n";
+  return 0;
 }
 
 int listKeys(const std::string &prefix = "", bool verbose = false) {
@@ -143,7 +194,7 @@ int listKeys(const std::string &prefix = "", bool verbose = false) {
   // Filter and display keys
   bool found_keys = false;
   for (const auto &descriptor : key_descriptors) {
-    const std::string alias = descriptor.alias.value_or("Key with unnamed alias");
+    const std::string alias = descriptor.alias.value_or("");
 
     // Apply prefix filter if specified
     if (!prefix.empty() && alias.find(prefix) != 0) {
@@ -161,7 +212,7 @@ int listKeys(const std::string &prefix = "", bool verbose = false) {
       KeyEntryResponse key_entry_response;
       auto ker_status = service->getKeyEntry(descriptor, &key_entry_response);
       if (!ker_status.isOk())
-        std::cout << "No key entry response, skipping" << "\n";
+        std::cout << "Key: " << alias << ": No key entry response, skipping detailed information" << "\n";
       else
         std::cout << toString(key_entry_response.metadata) << std::endl;
     } else
@@ -180,6 +231,7 @@ int listKeys(const std::string &prefix = "", bool verbose = false) {
 }
 
 // Signing
+
 int generate_signkg(const std::string &key_name, int timeout_seconds) {
   auto security_level = getSecurityLevel();
   if (!security_level)
@@ -207,9 +259,9 @@ int generate_signkg(const std::string &key_name, int timeout_seconds) {
                                             {}, // entropy
                                             &metadata);
   if (!status.isOk())
-    return Error() << "generateKey failed: " << status;
+    return Error() << "Key generation failed: " << status;
 
-  std::cout << "Key generated: " << key_name << std::endl;
+  std::cout << "Key for signing generated: " << key_name << std::endl;
   std::cout << toString(metadata) << std::endl;
   return 0;
 }
@@ -249,7 +301,7 @@ int signkg(const std::string &key_name) {
     std::optional<std::vector<uint8_t>> output;
     status = operation->update(chunk, &output);
     if (!status.isOk()) {
-      operation->finish({}, {}, &signature);
+      operation->abort();
       return Error() << "Failed to call keystore update operation:" << status;
     }
   }
@@ -267,7 +319,206 @@ int signkg(const std::string &key_name) {
   return true;
 }
 
-// command line options
+// encryption
+
+int generate_enc(const std::string &key_name) {
+  auto security_level = getSecurityLevel();
+  if (!security_level)
+    return Error() << "Failed to get security level";
+
+  KeyDescriptor keyDesc = getKeyDescriptor(key_name);
+
+  std::vector<KeyParameter> params = {
+      {.tag = Tag::ALGORITHM, .value = KeyParameterValue::make<KeyParameterValue::algorithm>(Algorithm::AES)},
+      {.tag = Tag::KEY_SIZE, .value = KeyParameterValue::make<KeyParameterValue::integer>(256)},
+      {.tag = Tag::PURPOSE, .value = KeyParameterValue::make<KeyParameterValue::keyPurpose>(KeyPurpose::ENCRYPT)},
+      {.tag = Tag::PURPOSE, .value = KeyParameterValue::make<KeyParameterValue::keyPurpose>(KeyPurpose::DECRYPT)},
+      {.tag = Tag::BLOCK_MODE, .value = KeyParameterValue::make<KeyParameterValue::blockMode>(BlockMode::GCM)},
+      {.tag = Tag::PADDING, .value = KeyParameterValue::make<KeyParameterValue::paddingMode>(PaddingMode::NONE)},
+      {.tag = Tag::MIN_MAC_LENGTH, .value = KeyParameterValue::make<KeyParameterValue::integer>(ENCRYPTION_MAC_LENGTH)},
+      {.tag = Tag::NO_AUTH_REQUIRED, .value = KeyParameterValue::make<KeyParameterValue::boolValue>(true)},
+  };
+
+  KeyMetadata metadata;
+  auto status = security_level->generateKey(keyDesc, {}, // attestation key
+                                            params,
+                                            0,  // flags
+                                            {}, // entropy
+                                            &metadata);
+  if (!status.isOk())
+    return Error() << "Key generation failed: " << status;
+
+  std::cout << "Encryption key generated: " << key_name << std::endl;
+  std::cout << toString(metadata) << std::endl;
+
+  return 0;
+}
+
+int encrypt(const std::string &key_name) {
+  auto security_level = getSecurityLevel();
+  if (!security_level)
+    return Error() << "Failed to get security level";
+
+  // Read input
+  std::vector<uint8_t> input;
+  if (!readStdin(input))
+    return Error() << "Failed to read from stdin.";
+
+  KeyDescriptor keyDesc = getKeyDescriptor(key_name);
+
+  std::vector<KeyParameter> params = {
+      {.tag = Tag::PURPOSE, .value = KeyParameterValue::make<KeyParameterValue::keyPurpose>(KeyPurpose::ENCRYPT)},
+      {.tag = Tag::BLOCK_MODE, .value = KeyParameterValue::make<KeyParameterValue::blockMode>(BlockMode::GCM)},
+      {.tag = Tag::PADDING, .value = KeyParameterValue::make<KeyParameterValue::paddingMode>(PaddingMode::NONE)},
+      {.tag = Tag::MAC_LENGTH, .value = KeyParameterValue::make<KeyParameterValue::integer>(ENCRYPTION_MAC_LENGTH)},
+  };
+
+  CreateOperationResponse opResponse;
+  auto status = security_level->createOperation(keyDesc, params, false, &opResponse);
+  if (!status.isOk())
+    return Error() << "Failed to create keystore encryption operation: " << status;
+
+  auto operation = opResponse.iOperation;
+  std::vector<uint8_t> encrypted_output;
+
+  // Process input in chunks
+  for (size_t i = 0; i < input.size(); i += CHUNK_SIZE) {
+    size_t chunk_size = std::min(CHUNK_SIZE, input.size() - i);
+    std::vector<uint8_t> chunk(input.begin() + i, input.begin() + i + chunk_size);
+
+    std::optional<std::vector<uint8_t>> output;
+    status = operation->update(chunk, &output);
+    if (!status.isOk()) {
+      std::optional<std::vector<uint8_t>> dummy;
+      operation->abort();
+      return Error() << "Failed to call keystore update operation: " << status;
+    }
+
+    if (output.has_value()) {
+      encrypted_output.insert(encrypted_output.end(), output->begin(), output->end());
+    }
+  }
+
+  // Finish the operation to get the final encrypted data + auth tag
+  std::optional<std::vector<uint8_t>> final_output;
+  status = operation->finish({}, {}, &final_output);
+  if (!status.isOk())
+    return Error() << "Failed to call keystore finish operation: " << status;
+
+  if (final_output.has_value()) {
+    encrypted_output.insert(encrypted_output.end(), final_output->begin(), final_output->end());
+  }
+
+  // get init vector (nonce)
+  std::vector<uint8_t> init_vector;
+  {
+    auto params = opResponse.parameters;
+    for (auto &p : params->keyParameter) {
+      if (auto iv = authorizationValue(TAG_NONCE, p)) {
+        init_vector = std::move(iv->get());
+        break;
+      }
+    }
+    if (init_vector.empty())
+      return Error() << "Encryption operation did not return an init_vector.";
+  }
+
+  hwcrypt::EncryptedPlainData protobuf;
+  protobuf.set_init_vector(init_vector.data(), init_vector.size());
+  protobuf.set_encrypted_data(encrypted_output.data(), encrypted_output.size());
+  if (!protobuf.SerializeToOstream(&std::cout))
+    return Error() << "Failed to serialize the result";
+  return 0;
+}
+
+int decrypt(const std::string &key_name) {
+  auto security_level = getSecurityLevel();
+  if (!security_level)
+    return Error() << "Failed to get security level";
+
+  hwcrypt::EncryptedPlainData protobuf;
+  if (!protobuf.ParseFromIstream(&std::cin))
+    return Error() << "Failed to read from stdin.";
+
+  std::vector<uint8_t> init_vector(protobuf.init_vector().begin(), protobuf.init_vector().end());
+  std::string input = protobuf.encrypted_data();
+
+  KeyDescriptor keyDesc = getKeyDescriptor(key_name);
+
+  std::vector<KeyParameter> params = {
+      {.tag = Tag::PURPOSE, .value = KeyParameterValue::make<KeyParameterValue::keyPurpose>(KeyPurpose::DECRYPT)},
+      {.tag = Tag::BLOCK_MODE, .value = KeyParameterValue::make<KeyParameterValue::blockMode>(BlockMode::GCM)},
+      {.tag = Tag::PADDING, .value = KeyParameterValue::make<KeyParameterValue::paddingMode>(PaddingMode::NONE)},
+      {.tag = Tag::MAC_LENGTH, .value = KeyParameterValue::make<KeyParameterValue::integer>(ENCRYPTION_MAC_LENGTH)},
+      {.tag = Tag::NONCE, .value = KeyParameterValue::make<KeyParameterValue::blob>(init_vector)},
+  };
+
+  CreateOperationResponse opResponse;
+  auto status = security_level->createOperation(keyDesc, params, false, &opResponse);
+  if (!status.isOk())
+    return Error() << "Failed to create keystore decryption operation: " << status;
+
+  auto operation = opResponse.iOperation;
+  std::vector<uint8_t> decrypted_output;
+
+  // Process input in chunks
+  for (size_t i = 0; i < input.size(); i += CHUNK_SIZE) {
+    size_t chunk_size = std::min(CHUNK_SIZE, input.size() - i);
+    std::vector<uint8_t> chunk(input.begin() + i, input.begin() + i + chunk_size);
+
+    std::optional<std::vector<uint8_t>> output;
+    status = operation->update(chunk, &output);
+    if (!status.isOk()) {
+      std::optional<std::vector<uint8_t>> dummy;
+      operation->abort();
+      return Error() << "Failed to call keystore update operation: " << status;
+    }
+
+    if (output.has_value()) {
+      decrypted_output.insert(decrypted_output.end(), output->begin(), output->end());
+    }
+  }
+
+  // Finish the operation - this will verify the auth tag and return final plaintext
+  std::optional<std::vector<uint8_t>> final_output;
+  status = operation->finish({}, {}, &final_output);
+  if (!status.isOk())
+    return Error() << "Failed to call keystore finish operation (authentication may have failed): " << status;
+
+  if (final_output.has_value()) {
+    decrypted_output.insert(decrypted_output.end(), final_output->begin(), final_output->end());
+  }
+
+  print(decrypted_output);
+  return 0;
+}
+
+// key management
+int deleteKey(const std::string &key_name) {
+  auto service = getKeystoreService();
+  if (!service) {
+    return Error() << "Failed to get keystore service";
+  }
+
+  KeyDescriptor descriptor_alias = getKeyDescriptor(key_name);
+
+  KeyEntryResponse key_entry_response;
+  auto ker_status = service->getKeyEntry(descriptor_alias, &key_entry_response);
+  if (!ker_status.isOk())
+    return Error() << "Key " << key_name << " not found" << "\n";
+
+  KeyDescriptor key = key_entry_response.metadata.key;
+  auto del_status = service->deleteKey(key);
+  if (!del_status.isOk())
+    return Error() << "Key delete failed" << del_status << "\n";
+
+  std::cout << "Key " << key_name << " deleted" << "\n";
+
+  return 0;
+}
+
+// command line options and handling commands
+
 DEFINE_string(name, "", "Key name for operations");
 DEFINE_string(prefix, "", "Key name prefix for list command");
 DEFINE_bool(verbose, false, "Enable verbose output");
@@ -312,9 +563,9 @@ void printUsage(const char *prog) {
   std::cout << "Usage: " << prog << " command [arguments]\n\n"
             << "Commands: \n\n"
             << "  Generic commands:\n"
-            << "          get-chars --name=<key_name> [-verbose]\n"
+            << "          get-chars --name=<key_name> [--verbose]\n"
             << "          delete --name=<key_name>\n"
-            << "          list [--prefix=<key_name_prefix>]\n\n"
+            << "          list [--prefix=<key_name_prefix>] [--verbose]\n\n"
             << "          haskey [--name=<key_name>]\n\n"
             << "  Encryption and decryption commands:\n"
             << "          generate-enc --name=<key_name>\n"
@@ -357,30 +608,25 @@ int executeCommand(Command cmd) {
   // process the command
   switch (cmd) {
   case Command::GET_CHARS:
-    // TODO: Implement get-chars logic
-    break;
+    return getCharacteristics(FLAGS_name);
 
   case Command::DELETE:
-    // TODO: Implement delete logic
-    break;
+    return deleteKey(FLAGS_name);
 
   case Command::LIST:
     return listKeys(FLAGS_prefix, FLAGS_verbose);
 
   case Command::HASKEY:
-    // TODO: Implement haskey logic
-    // Return 0 if key exists, non-zero otherwise
-    break;
+    return hasKey(FLAGS_name);
 
   case Command::GENERATE_ENC:
-    // TODO: Implement generate-enc logic
-    break;
+    return generate_enc(FLAGS_name);
 
   case Command::ENCRYPT:
-    break;
+    return encrypt(FLAGS_name);
 
   case Command::DECRYPT:
-    break;
+    return decrypt(FLAGS_name);
 
   case Command::GENERATE_SIGNKG:
     return generate_signkg(FLAGS_name, FLAGS_time_between_tries);
