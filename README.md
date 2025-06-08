@@ -6,6 +6,10 @@ relies of Android stack for hardware based encryption. There are
 several versions of this tool with some using keystore v1 and some
 keystore2.
 
+This version of hwcrypt is using Keystore2 system service via 
+the IKeystoreService AIDL interface at the service path 
+`android.system.keystore2.IKeystoreService/default`.
+
 Original tool was based
 on `system/security/keystore/keystore_cli_v2.cpp`,
 `system/vold/cryptfs.cpp` and codes used by them.
