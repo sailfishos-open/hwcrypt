@@ -135,9 +135,8 @@ std::string toString(const KeyMetadata &metadata) {
 
 int getCharacteristics(const std::string &key_name) {
   auto service = getKeystoreService();
-  if (!service) {
-    return Error() << "Failed to get keystore service";
-  }
+  if (!service)
+    return 1;
 
   KeyDescriptor descriptor = getKeyDescriptor(key_name);
 
@@ -145,7 +144,7 @@ int getCharacteristics(const std::string &key_name) {
   auto ker_status = service->getKeyEntry(descriptor, &key_entry_response);
   if (!ker_status.isOk()) {
     std::cout << "Key not found" << "\n";
-    return 0;
+    return 1;
   }
 
   auto metadata = key_entry_response.metadata;
@@ -160,9 +159,8 @@ int getCharacteristics(const std::string &key_name) {
 // NB! returns 0 if there is a key and non-zero otherwise
 int hasKey(const std::string &key_name) {
   auto service = getKeystoreService();
-  if (!service) {
-    return Error() << "Failed to get keystore service";
-  }
+  if (!service)
+    return 1;
 
   KeyDescriptor descriptor = getKeyDescriptor(key_name);
 
@@ -179,17 +177,15 @@ int hasKey(const std::string &key_name) {
 
 int listKeys(const std::string &prefix = "", bool verbose = false) {
   auto service = getKeystoreService();
-  if (!service) {
-    return Error() << "Failed to get keystore service";
-  }
+  if (!service)
+    return 1;
 
   // List keys for the current application domain
   std::vector<KeyDescriptor> key_descriptors;
   auto status = service->listEntries(Domain::APP, 0, &key_descriptors);
 
-  if (!status.isOk()) {
+  if (!status.isOk())
     return Error() << "Failed to list keys: " << status.getMessage();
-  }
 
   // Filter and display keys
   bool found_keys = false;
@@ -235,7 +231,7 @@ int listKeys(const std::string &prefix = "", bool verbose = false) {
 int generate_signkg(const std::string &key_name, int timeout_seconds) {
   auto security_level = getSecurityLevel();
   if (!security_level)
-    return false;
+    return 1;
 
   KeyDescriptor keyDesc = getKeyDescriptor(key_name);
 
@@ -269,7 +265,7 @@ int generate_signkg(const std::string &key_name, int timeout_seconds) {
 int signkg(const std::string &key_name) {
   auto security_level = getSecurityLevel();
   if (!security_level)
-    return false;
+    return 1;
 
   // Read input
   std::vector<uint8_t> input;
@@ -315,8 +311,7 @@ int signkg(const std::string &key_name) {
     return Error() << "Didn't receive a signature from keystore finish operation.";
 
   print(signature.value());
-
-  return true;
+  return 0;
 }
 
 // encryption
@@ -324,7 +319,7 @@ int signkg(const std::string &key_name) {
 int generate_enc(const std::string &key_name) {
   auto security_level = getSecurityLevel();
   if (!security_level)
-    return Error() << "Failed to get security level";
+    return 1;
 
   KeyDescriptor keyDesc = getKeyDescriptor(key_name);
 
@@ -350,14 +345,13 @@ int generate_enc(const std::string &key_name) {
 
   std::cout << "Encryption key generated: " << key_name << std::endl;
   std::cout << toString(metadata) << std::endl;
-
   return 0;
 }
 
 int encrypt(const std::string &key_name) {
   auto security_level = getSecurityLevel();
   if (!security_level)
-    return Error() << "Failed to get security level";
+    return 1;
 
   // Read input
   std::vector<uint8_t> input;
@@ -434,7 +428,7 @@ int encrypt(const std::string &key_name) {
 int decrypt(const std::string &key_name) {
   auto security_level = getSecurityLevel();
   if (!security_level)
-    return Error() << "Failed to get security level";
+    return 1;
 
   hwcrypt::EncryptedPlainData protobuf;
   if (!protobuf.ParseFromIstream(&std::cin))
@@ -496,9 +490,8 @@ int decrypt(const std::string &key_name) {
 // key management
 int deleteKey(const std::string &key_name) {
   auto service = getKeystoreService();
-  if (!service) {
-    return Error() << "Failed to get keystore service";
-  }
+  if (!service)
+    return 1;
 
   KeyDescriptor descriptor_alias = getKeyDescriptor(key_name);
 
@@ -513,7 +506,6 @@ int deleteKey(const std::string &key_name) {
     return Error() << "Key delete failed" << del_status << "\n";
 
   std::cout << "Key " << key_name << " deleted" << "\n";
-
   return 0;
 }
 
